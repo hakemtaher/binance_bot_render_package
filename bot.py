@@ -11,6 +11,8 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
 google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
 
