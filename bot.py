@@ -12,7 +12,20 @@ API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
-GOOGLE_CREDENTIALS_JSON = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
+
+if not google_creds_env:
+    raise Exception("Missing GOOGLE_CREDENTIALS in environment variables")
+
+# Convert escaped \n to actual newlines
+google_creds_json = google_creds_env.replace('\\n', '\n')
+
+# Write to a temporary JSON file
+with open("google_credentials.json", "w") as f:
+    f.write(google_creds_json)
+
+creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
+
 
 client = Client(API_KEY, API_SECRET)
 
