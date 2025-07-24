@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: binance-trading-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    plan: free
+    envVars:
+      - key: API_KEY
+        value: your_binance_api_key
+      - key: API_SECRET
+        value: your_binance_api_secret
+      - key: WEBHOOK_SECRET
+        value: your-secret-path
+      - key: GOOGLE_SHEET_NAME
+        value: Binance_Logs
+      - key: GOOGLE_CREDENTIALS
+        value: '{"type": "service_account", ... your full JSON credentials here ... }'

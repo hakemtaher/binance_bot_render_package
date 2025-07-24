@@ -1,0 +1,24 @@
+//@version=5
+indicator("UT Bot + STC Combined Alert", overlay=true)
+
+factor = input.float(1.0, title="Factor")
+atrPeriod = input.int(10, title="ATR Period")
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+stcLength = input.int(10, title="STC Length")
+stcK = input.int(23, title="STC K Period")
+stcD = input.int(50, title="STC D Period")
+k = ta.ema(close, stcK)
+d = ta.ema(k, stcD)
+macd = k - d
+stc = ta.ema(macd, stcLength)
+isSTCGreen = stc > ta.ema(stc, 3)
+
+buySignal = direction == 1 and isSTCGreen
+sellSignal = direction == -1
+
+plotshape(buySignal, location=location.belowbar, color=color.green, style=shape.labelup)
+plotshape(sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown)
+
+alertcondition(buySignal, title="Buy", message='{"action":"buy", "symbol":"{{ticker}}", "amount":250}')
+alertcondition(sellSignal, title="Sell", message='{"action":"sell", "symbol":"{{ticker}}"}')
