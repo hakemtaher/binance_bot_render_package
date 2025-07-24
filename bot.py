@@ -13,35 +13,18 @@ API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
 google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
-
 if not google_creds_env:
-    raise Exception("Missing GOOGLE_CREDENTIALS in environment variables")
+    raise Exception("Missing GOOGLE_CREDENTIALS")
 
-# Convert escaped \n to actual newlines
-google_creds_json = google_creds_env.replace('\\n', '\n')
+# Make sure \n is interpreted properly
+google_creds_json = google_creds_env.encode().decode('unicode_escape')
 
-# Write to a temporary JSON file
 with open("google_credentials.json", "w") as f:
     f.write(google_creds_json)
 
-google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
-
-if not google_creds_env:
-    raise Exception("Missing GOOGLE_CREDENTIALS in environment variables")
-
-# Convert escaped \n to actual newlines
-google_creds_json = google_creds_env.replace('\\n', '\n')
-
-# Write to a temporary JSON file
-with open("google_credentials.json", "w") as f:
-    f.write(google_creds_json)
-
+from oauth2client.service_account import ServiceAccountCredentials
 creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
-
-
-
 client = Client(API_KEY, API_SECRET)
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
