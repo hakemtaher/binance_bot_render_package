@@ -5,6 +5,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import os
 import json
+from dotenv import load_dotenv
+load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
