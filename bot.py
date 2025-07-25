@@ -1,103 +1,99 @@
+import os
+import json
 from flask import Flask, request, jsonify
 from binance.client import Client
-from datetime import datetime
-import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import os
+import gspread
+from datetime import datetime
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# --- Binance Setup ---
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+client = Client(API_KEY, API_SECRET)
+
+# --- Flask Setup ---
 app = Flask(__name__)
 
-# Environment variables
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-
-# Validate essential variables
+# --- Google Sheets Setup ---
+GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
 if not GOOGLE_CREDENTIALS:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
-if not WEBHOOK_SECRET:
-    raise Exception("Missing WEBHOOK_SECRET environment variable")
 
-# Google Sheets setup
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials_path = "/tmp/google_creds.json"
-with open(credentials_path, "w") as f:
-    f.write(GOOGLE_CREDENTIALS)
-creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_path, scope)
-client = gspread.authorize(creds)
-sheet = client.open("Binance Trades Log").sheet1
+credentials_dict = json.loads(GOOGLE_CREDENTIALS)
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
+gc = gspread.authorize(creds)
 
-# Binance client
-binance = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance Trade Log")
+sheet = gc.open(SHEET_NAME).sheet1
 
-@app.route("/webhook", methods=["POST"])
+# --- Helper: Find open row by symbol ---
+def find_open_trade(symbol):
+    records = sheet.get_all_records()
+    for idx, row in enumerate(records, start=2):  # sheet1 starts at row 2 for data
+        if row['Symbol'] == symbol and row['Closed (Yes/No)'].strip().lower() != 'yes':
+            return idx, row
+    return None, None
+
+# --- Flask route ---
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
 
-    if not data or data.get("secret") != WEBHOOK_SECRET:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    symbol = data.get("symbol")
-    action = data.get("action")
-    usdt_amount = float(data.get("amount"))
-    testing = data.get("testing", "no").lower() == "yes"
-
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-    if action not in ["buy", "sell"]:
-        return jsonify({"error": "Invalid action"}), 400
-
-    price = get_price(symbol)
-    if price is None:
-        return jsonify({"error": "Failed to fetch price"}), 500
-
-    quantity = round(usdt_amount / price, 6)
-
-    if testing:
-        log_trade(symbol, now, action, price, usdt_amount, testing=True)
-        return jsonify({"message": "Logged test action"}), 200
+    # Secret check
+    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
+        return jsonify({"error": "Invalid secret"}), 403
 
     try:
-        if action == "buy":
-            order = binance.create_order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=usdt_amount)
-            log_trade(symbol, now, "buy", price, usdt_amount, testing=False)
-        elif action == "sell":
-            order = binance.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=quantity)
-            log_trade(symbol, now, "sell", price, usdt_amount, testing=False)
+        symbol = data['symbol']
+        action = data['action']
+        amount_usdt = float(data['amount'])
+        testing = str(data.get('testing', 'no')).lower() == 'yes'
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Get current price
+        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+
+        # Calculate quantity (amount in USDT / price)
+        quantity = round(amount_usdt / price, 6)
+
+        if action == 'buy':
+            if not testing:
+                order = client.order_market_buy(symbol=symbol, quantity=quantity)
+            sheet.append_row([
+                symbol,
+                now,
+                price,
+                amount_usdt,
+                "Yes" if testing else "No",
+                "", "", "", "No"
+            ])
+            return jsonify({"status": "buy logged", "testing": testing})
+
+        elif action == 'sell':
+            row_idx, buy_row = find_open_trade(symbol)
+            if not buy_row:
+                return jsonify({"error": "No open buy found for symbol"}), 400
+
+            profit = price - float(buy_row['Buy Price'])
+            profit = round(profit * float(buy_row['Amount']) / float(buy_row['Buy Price']), 2)
+
+            if not testing:
+                order = client.order_market_sell(symbol=symbol, quantity=quantity)
+
+            sheet.update(f"F{row_idx}:I{row_idx}", [[now, price, profit, "Yes"]])
+            return jsonify({"status": "sell logged", "profit": profit, "testing": testing})
+
+        else:
+            return jsonify({"error": "Invalid action"}), 400
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"message": f"{action.upper()} executed"}), 200
-
-def get_price(symbol):
-    try:
-        ticker = binance.get_symbol_ticker(symbol=symbol)
-        return float(ticker["price"])
-    except:
-        return None
-
-def log_trade(symbol, timestamp, action, price, amount, testing):
-    rows = sheet.get_all_values()
-    header = rows[0] if rows else []
-    matched_row_index = None
-
-    for idx, row in enumerate(rows[1:], start=2):  # Skip header
-        if row[0] == symbol and row[8] != "Yes":  # "Closed" column
-            matched_row_index = idx
-            break
-
-    if action == "buy" or matched_row_index is None:
-        sheet.append_row([
-            symbol, timestamp, price, amount, "Yes" if testing else "No", "", "", "", "No"
-        ])
-    else:
-        row = sheet.row_values(matched_row_index)
-        profit = (float(price) - float(row[2])) * float(row[3])
-        sheet.update(f"F{matched_row_index}", timestamp)
-        sheet.update(f"G{matched_row_index}", price)
-        sheet.update(f"H{matched_row_index}", round(profit, 2))
-        sheet.update(f"I{matched_row_index}", "Yes")
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+# --- Run app ---
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
