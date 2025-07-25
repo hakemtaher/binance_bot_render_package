@@ -1,99 +1,93 @@
 import os
 import json
+import time
+from datetime import datetime
 from flask import Flask, request, jsonify
 from binance.client import Client
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
-from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# --- Binance Setup ---
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-client = Client(API_KEY, API_SECRET)
-
-# --- Flask Setup ---
-app = Flask(__name__)
-
-# --- Google Sheets Setup ---
+# Load environment variables
+API_KEY = os.environ.get("BINANCE_API_KEY")
+API_SECRET = os.environ.get("BINANCE_API_SECRET")
 GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
+SHEET_NAME = os.environ.get("SHEET_NAME", "Binance Bot Log")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "secret123")
+
 if not GOOGLE_CREDENTIALS:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
 
-credentials_dict = json.loads(GOOGLE_CREDENTIALS)
+# Prepare Google Sheets credentials
+credentials_dict = json.loads(GOOGLE_CREDENTIALS.replace('\\n', '\n'))
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
 gc = gspread.authorize(creds)
 
-SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance Trade Log")
-sheet = gc.open(SHEET_NAME).sheet1
+# Access the sheet
+sh = gc.open(SHEET_NAME)
+worksheet = sh.sheet1
 
-# --- Helper: Find open row by symbol ---
-def find_open_trade(symbol):
-    records = sheet.get_all_records()
-    for idx, row in enumerate(records, start=2):  # sheet1 starts at row 2 for data
-        if row['Symbol'] == symbol and row['Closed (Yes/No)'].strip().lower() != 'yes':
-            return idx, row
-    return None, None
+# Setup Binance client
+client = Client(API_KEY, API_SECRET)
 
-# --- Flask route ---
-@app.route('/webhook', methods=['POST'])
+# Create Flask app
+app = Flask(__name__)
+
+def log_trade_to_sheet(symbol, action, amount_usdt, price, testing):
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    testing_flag = "Yes" if testing else "No"
+
+    if action == "BUY":
+        row = [symbol, timestamp, price, amount_usdt, testing_flag, "", "", "", "No"]
+        worksheet.append_row(row)
+    elif action == "SELL":
+        # Find the latest unmatched BUY
+        records = worksheet.get_all_records()
+        for i in reversed(range(len(records))):
+            row = records[i]
+            if row["Symbol"] == symbol and row["Closed (Yes/No)"] != "Yes":
+                buy_price = float(row["Buy Price"])
+                amount = float(row["Amount"])
+                sell_price = float(price)
+                profit = round((sell_price - buy_price) * amount / buy_price, 2)
+
+                worksheet.update_cell(i + 2, 6, timestamp)  # Sell Timestamp
+                worksheet.update_cell(i + 2, 7, sell_price)  # Sell Price
+                worksheet.update_cell(i + 2, 8, profit)  # Profit
+                worksheet.update_cell(i + 2, 9, "Yes")  # Closed
+                break
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    data = request.json
+    secret = data.get("secret")
+    if secret != WEBHOOK_SECRET:
+        return jsonify({"error": "Unauthorized"}), 403
 
-    # Secret check
-    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
-        return jsonify({"error": "Invalid secret"}), 403
+    symbol = data["symbol"]
+    side = data["side"].upper()
+    amount_usdt = float(data["amount"])
+    testing = data.get("testing", False)
 
     try:
-        symbol = data['symbol']
-        action = data['action']
-        amount_usdt = float(data['amount'])
-        testing = str(data.get('testing', 'no')).lower() == 'yes'
-        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        if side == "BUY":
+            order = client.order_market_buy(symbol=symbol, quoteOrderQty=amount_usdt)
+            price = float(order["fills"][0]["price"])
+            log_trade_to_sheet(symbol, "BUY", amount_usdt, price, testing)
 
-        # Get current price
-        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+        elif side == "SELL":
+            # Get current quantity of the asset
+            asset = symbol.replace("USDT", "")
+            balance = client.get_asset_balance(asset=asset)
+            quantity = float(balance["free"])
 
-        # Calculate quantity (amount in USDT / price)
-        quantity = round(amount_usdt / price, 6)
+            order = client.order_market_sell(symbol=symbol, quantity=quantity)
+            price = float(order["fills"][0]["price"])
+            log_trade_to_sheet(symbol, "SELL", amount_usdt, price, testing)
 
-        if action == 'buy':
-            if not testing:
-                order = client.order_market_buy(symbol=symbol, quantity=quantity)
-            sheet.append_row([
-                symbol,
-                now,
-                price,
-                amount_usdt,
-                "Yes" if testing else "No",
-                "", "", "", "No"
-            ])
-            return jsonify({"status": "buy logged", "testing": testing})
-
-        elif action == 'sell':
-            row_idx, buy_row = find_open_trade(symbol)
-            if not buy_row:
-                return jsonify({"error": "No open buy found for symbol"}), 400
-
-            profit = price - float(buy_row['Buy Price'])
-            profit = round(profit * float(buy_row['Amount']) / float(buy_row['Buy Price']), 2)
-
-            if not testing:
-                order = client.order_market_sell(symbol=symbol, quantity=quantity)
-
-            sheet.update(f"F{row_idx}:I{row_idx}", [[now, price, profit, "Yes"]])
-            return jsonify({"status": "sell logged", "profit": profit, "testing": testing})
-
-        else:
-            return jsonify({"error": "Invalid action"}), 400
-
+        return jsonify({"status": "success", "symbol": symbol, "side": side})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Run app ---
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
