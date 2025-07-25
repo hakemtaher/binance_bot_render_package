@@ -1,4 +1,5 @@
 flask
-python-binance
 gspread
 oauth2client
+python-binance
+python-dotenv
