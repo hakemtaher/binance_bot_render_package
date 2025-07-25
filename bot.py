@@ -6,37 +6,47 @@ from datetime import datetime
 import os
 import json
 from dotenv import load_dotenv
+
+# Load environment variables from .env
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
+
+# Define scope for Google Sheets and Drive API
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
+# Parse and write GOOGLE_CREDENTIALS to file
 google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
 if not google_creds_env:
-    raise Exception("Missing GOOGLE_CREDENTIALS")
+    raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
 
-# Make sure \n is interpreted properly
+# Convert escaped newline characters properly
 google_creds_json = google_creds_env.encode().decode('unicode_escape')
 
-with open("google_credentials.json", "w") as f:
-    f.write(google_creds_json)
+# Convert string to dict for JSON dump
+GOOGLE_CREDENTIALS_DICT = json.loads(google_creds_json)
 
-from oauth2client.service_account import ServiceAccountCredentials
+# Write JSON credentials to a file
+with open("google_credentials.json", "w") as f:
+    json.dump(GOOGLE_CREDENTIALS_DICT, f)
+
+# Authenticate with Google Sheets
 creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
-client = Client(API_KEY, API_SECRET)
-
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-with open("google_credentials.json", "w") as f:
-    json.dump(GOOGLE_CREDENTIALS_JSON, f)
-creds = ServiceAccountCredentials.from_json_keyfile_name('google_credentials.json', scope)
 gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
+
+# Initialize Binance client
+client = Client(API_KEY, API_SECRET)
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Add header row if sheet is empty
 if sheet.row_count < 2:
     sheet.append_row(["Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity"])
-
-app = Flask(__name__)
 
 @app.route(f'/webhook/{WEBHOOK_SECRET}', methods=['POST'])
 def webhook():
