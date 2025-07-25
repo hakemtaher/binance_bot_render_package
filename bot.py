@@ -1,122 +1,115 @@
 import os
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request, abort
 from binance.client import Client
 from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
-# Load API keys
-api_key = os.getenv('BINANCE_API_KEY')
-api_secret = os.getenv('BINANCE_API_SECRET')
-google_credentials = os.getenv('GOOGLE_CREDENTIALS')
+# Binance credentials
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+client = Client(API_KEY, API_SECRET)
 
-if not google_credentials:
+# Webhook secret
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
+# Google Sheets setup
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+credentials_path = os.getenv("GOOGLE_CREDENTIALS")
+if not credentials_path:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
-
-client = Client(api_key, api_secret)
-
-# Setup Google Sheets
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-creds = ServiceAccountCredentials.from_json_keyfile_name(google_credentials, scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_path, scope)
 gs_client = gspread.authorize(creds)
-sheet = gs_client.open("Binance Bot Logs").sheet1
+sheet = gs_client.open("Binance Trades").sheet1
 
-# Round quantity based on symbol precision
-def round_step_size(quantity, step_size):
-    precision = int(round(-1 * (len(str(step_size).split(".")[1]))))
-    return round(quantity, precision)
+# Helper: insert row
+def insert_buy_row(data):
+    row = [
+        data["symbol"],
+        data["timestamp"],
+        data["buy_price"],
+        data["usdt_amount"],
+        data["testing"],
+        "", "", "", "No"
+    ]
+    sheet.append_row(row)
+    return sheet.row_count  # Return the row number
 
-# Get step size for a symbol
-def get_step_size(symbol):
-    info = client.get_symbol_info(symbol)
-    for f in info['filters']:
-        if f['filterType'] == 'LOT_SIZE':
-            return float(f['stepSize'])
-    return 0.000001  # fallback
+def update_sell(row_number, sell_price, sell_timestamp):
+    buy_price = float(sheet.cell(row_number, 3).value)
+    usdt_amount = float(sheet.cell(row_number, 4).value)
+    amount = usdt_amount / buy_price
+    sell_total = amount * float(sell_price)
+    profit = sell_total - usdt_amount
+    sheet.update(f"F{row_number}", sell_timestamp)
+    sheet.update(f"G{row_number}", sell_price)
+    sheet.update(f"H{row_number}", round(profit, 2))
+    sheet.update(f"I{row_number}", "Yes")
 
-# Log buy action
-def log_buy_trade(symbol, price, qty, usdt_amount, testing):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sheet.append_row([
-        symbol, timestamp, price, qty, usdt_amount, testing, '', '', '', 'No'
-    ])
-
-# Log sell and calculate profit
-def log_sell_trade(symbol, sell_price):
-    sell_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    records = sheet.get_all_values()
-
-    for i in range(len(records) - 1, 0, -1):
-        row = records[i]
-        if row[0] == symbol and row[9] != 'Yes' and row[6] == 'No':
-            try:
-                buy_price = float(row[2])
-                qty = float(row[3])
-                usdt_amount = float(row[4])
-                profit = round((sell_price - buy_price) * qty, 2)
-
-                sheet.update(f'G{i+1}:J{i+1}', [[
-                    sell_timestamp, sell_price, profit, 'Yes'
-                ]])
-            except Exception as e:
-                print("Logging sell failed:", e)
-            break
-
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
+    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
+        abort(403)
+
+    data = request.get_json()
     symbol = data.get("symbol")
     action = data.get("action")
     usdt_amount = float(data.get("amount", 0))
-    testing = str(data.get("testing", "no")).lower() == "yes"
-
-    if not symbol or not action or not usdt_amount:
-        return jsonify({"error": "Missing data"}), 400
+    testing = str(data.get("testing", "no")).lower()
+    testing_flag = "Yes" if testing == "yes" else "No"
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        price = float(client.get_symbol_ticker(symbol=symbol)["price"])
+        price_data = client.get_symbol_ticker(symbol=symbol)
+        price = float(price_data["price"])
     except Exception as e:
-        return jsonify({"error": f"Price fetch failed: {e}"}), 500
-
-    # Convert USDT to coin quantity
-    qty = usdt_amount / price
-    step = get_step_size(symbol)
-    qty = round_step_size(qty, step)
+        return {"error": f"Price fetch error: {str(e)}"}, 500
 
     if action == "buy":
-        if not testing:
-            try:
-                client.order_market_buy(symbol=symbol, quantity=qty)
-                print(f"[LIVE BUY] {symbol} for {usdt_amount} USDT = {qty}")
-            except Exception as e:
-                return jsonify({"error": f"Buy failed: {e}"}), 500
-        else:
-            print(f"[TEST BUY] {symbol} for {usdt_amount} USDT = {qty}")
+        row_data = {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "buy_price": price,
+            "usdt_amount": usdt_amount,
+            "testing": testing_flag
+        }
 
-        log_buy_trade(symbol, price, qty, usdt_amount, "Yes" if testing else "No")
+        row_number = insert_buy_row(row_data)
+
+        if testing_flag == "No":
+            quantity = round(usdt_amount / price, 5)
+            try:
+                client.order_market_buy(symbol=symbol, quantity=quantity)
+            except Exception as e:
+                return {"error": f"Buy failed: {str(e)}"}, 500
+
+        return {"status": "Buy recorded", "row": row_number}, 200
 
     elif action == "sell":
-        if not testing:
-            try:
-                client.order_market_sell(symbol=symbol, quantity=qty)
-                print(f"[LIVE SELL] {symbol} {qty}")
-            except Exception as e:
-                return jsonify({"error": f"Sell failed: {e}"}), 500
-        else:
-            print(f"[TEST SELL] {symbol} {qty}")
+        records = sheet.get_all_values()
+        for idx, row in reversed(list(enumerate(records[1:], start=2))):
+            if row[0] == symbol and row[8] != "Yes" and row[4] == testing_flag:
+                update_sell(idx, price, timestamp)
+                if testing_flag == "No":
+                    try:
+                        amount = float(row[3]) / float(row[2])
+                        quantity = round(amount, 5)
+                        client.order_market_sell(symbol=symbol, quantity=quantity)
+                    except Exception as e:
+                        return {"error": f"Sell failed: {str(e)}"}, 500
+                return {"status": "Sell recorded", "row": idx}, 200
 
-        log_sell_trade(symbol, price)
+        return {"error": "No matching open buy found"}, 404
 
-    else:
-        return jsonify({"error": "Invalid action"}), 400
-
-    return jsonify({"message": f"{'Test' if testing else 'Live'} {action} executed for {symbol}"}), 200
+    return {"error": "Invalid action"}, 400
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host='0.0.0.0', port=10000)
