@@ -1,0 +1,19 @@
+# 1. Go to the project directory
+cd ~/binance_bot_render_package
+
+# 2. Pull the latest updates from GitHub
+git pull origin main
+
+# 3. Activate the virtual environment
+source venv/bin/activate
+
+# 4. (Optional) Install updated requirements
+pip install -r requirements.txt
+
+# 5. Restart the service
+sudo systemctl restart binance-bot
+
+# 6. Check the service status
+sudo systemctl status binance-bot
+
+journalctl -u binance-bot -f
