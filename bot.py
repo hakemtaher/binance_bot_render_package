@@ -1,93 +1,101 @@
-import os
-import json
-import time
-from datetime import datetime
 from flask import Flask, request, jsonify
 from binance.client import Client
-from oauth2client.service_account import ServiceAccountCredentials
 import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+import os
+import json
+from dotenv import load_dotenv
 
-# Load environment variables
-API_KEY = os.environ.get("BINANCE_API_KEY")
-API_SECRET = os.environ.get("BINANCE_API_SECRET")
-GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
-SHEET_NAME = os.environ.get("SHEET_NAME", "Binance Bot Log")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "secret123")
+load_dotenv()
 
-if not GOOGLE_CREDENTIALS:
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
+if not google_creds_env:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
 
-# Prepare Google Sheets credentials
-credentials_dict = json.loads(GOOGLE_CREDENTIALS.replace('\\n', '\n'))
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
-gc = gspread.authorize(creds)
+google_creds_json = google_creds_env.encode().decode('unicode_escape')
 
-# Access the sheet
-sh = gc.open(SHEET_NAME)
-worksheet = sh.sheet1
+with open("google_credentials.json", "w") as f:
+    f.write(google_creds_json)
 
-# Setup Binance client
+creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
+gsheet_client = gspread.authorize(creds)
+sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
+
+if sheet.row_count < 2:
+    sheet.append_row(["Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing"])
+
 client = Client(API_KEY, API_SECRET)
-
-# Create Flask app
 app = Flask(__name__)
 
-def log_trade_to_sheet(symbol, action, amount_usdt, price, testing):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    testing_flag = "Yes" if testing else "No"
-
-    if action == "BUY":
-        row = [symbol, timestamp, price, amount_usdt, testing_flag, "", "", "", "No"]
-        worksheet.append_row(row)
-    elif action == "SELL":
-        # Find the latest unmatched BUY
-        records = worksheet.get_all_records()
-        for i in reversed(range(len(records))):
-            row = records[i]
-            if row["Symbol"] == symbol and row["Closed (Yes/No)"] != "Yes":
-                buy_price = float(row["Buy Price"])
-                amount = float(row["Amount"])
-                sell_price = float(price)
-                profit = round((sell_price - buy_price) * amount / buy_price, 2)
-
-                worksheet.update_cell(i + 2, 6, timestamp)  # Sell Timestamp
-                worksheet.update_cell(i + 2, 7, sell_price)  # Sell Price
-                worksheet.update_cell(i + 2, 8, profit)  # Profit
-                worksheet.update_cell(i + 2, 9, "Yes")  # Closed
-                break
-
-@app.route("/webhook", methods=["POST"])
+@app.route(f'/webhook/{WEBHOOK_SECRET}', methods=['POST'])
 def webhook():
     data = request.json
-    secret = data.get("secret")
-    if secret != WEBHOOK_SECRET:
-        return jsonify({"error": "Unauthorized"}), 403
-
-    symbol = data["symbol"]
-    side = data["side"].upper()
-    amount_usdt = float(data["amount"])
-    testing = data.get("testing", False)
+    print(f"Received Alert: {data}")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        if side == "BUY":
-            order = client.order_market_buy(symbol=symbol, quoteOrderQty=amount_usdt)
-            price = float(order["fills"][0]["price"])
-            log_trade_to_sheet(symbol, "BUY", amount_usdt, price, testing)
+        raw_symbol = data.get("symbol", "BTCUSDT").upper()
+        symbol = raw_symbol.split(":")[-1]
+        action = data.get("action")
+        testing = data.get("testing", "no").lower() == "yes"
 
-        elif side == "SELL":
-            # Get current quantity of the asset
+        # Get current price
+        ticker = client.get_symbol_ticker(symbol=symbol)
+        price = round(float(ticker["price"]), 2)
+
+        if action == "buy":
+            usdt_amount = float(data.get("amount", 20))
+            qty = round(usdt_amount / price, 6)
+
+            if testing:
+                sheet.append_row([now, "BUY", symbol, usdt_amount, price, qty, "YES"])
+                return jsonify({"status": "buy test logged", "symbol": symbol, "price": price, "qty": qty})
+            else:
+                order = client.create_order(
+                    symbol=symbol,
+                    side=Client.SIDE_BUY,
+                    type=Client.ORDER_TYPE_LIMIT,
+                    timeInForce=Client.TIME_IN_FORCE_GTC,
+                    quantity=qty,
+                    price=str(price)
+                )
+                sheet.append_row([now, "BUY", symbol, usdt_amount, price, qty, "NO"])
+                return jsonify({"status": "buy executed", "symbol": symbol, "price": price, "qty": qty})
+
+        elif action == "sell":
             asset = symbol.replace("USDT", "")
-            balance = client.get_asset_balance(asset=asset)
-            quantity = float(balance["free"])
+            balance = float(client.get_asset_balance(asset=asset)["free"])
+            qty = round(balance, 6)
 
-            order = client.order_market_sell(symbol=symbol, quantity=quantity)
-            price = float(order["fills"][0]["price"])
-            log_trade_to_sheet(symbol, "SELL", amount_usdt, price, testing)
+            if qty <= 0:
+                return jsonify({"status": "no balance to sell", "symbol": symbol})
 
-        return jsonify({"status": "success", "symbol": symbol, "side": side})
+            if testing:
+                sheet.append_row([now, "SELL", symbol, "ALL", price, qty, "YES"])
+                return jsonify({"status": "sell test logged", "symbol": symbol, "price": price, "qty": qty})
+            else:
+                order = client.create_order(
+                    symbol=symbol,
+                    side=Client.SIDE_SELL,
+                    type=Client.ORDER_TYPE_LIMIT,
+                    timeInForce=Client.TIME_IN_FORCE_GTC,
+                    quantity=qty,
+                    price=str(price)
+                )
+                sheet.append_row([now, "SELL", symbol, "ALL", price, qty, "NO"])
+                return jsonify({"status": "sell executed", "symbol": symbol, "price": price, "qty": qty})
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)})
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    return jsonify({"status": "no valid action"})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
