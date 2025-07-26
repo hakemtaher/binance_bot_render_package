@@ -4,57 +4,36 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import os
-import json
 from dotenv import load_dotenv
 
-# ✅ Load environment variables before using them
+# ✅ Load .env
 load_dotenv()
+
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 
-print(f"[DEBUG] Loaded WEBHOOK_SECRET: {WEBHOOK_SECRET}")
+print(f"[DEBUG] WEBHOOK_SECRET = {WEBHOOK_SECRET}")
+print(f"[DEBUG] Using credentials from {GOOGLE_CREDENTIALS_FILE}")
 
-# ✅ Initialize Flask AFTER loading .env
+# ✅ Initialize Flask
 app = Flask(__name__)
 
-# ✅ Print to confirm correct route registration
-print(f"[DEBUG] Registering webhook route at /webhook/{WEBHOOK_SECRET}")
-
-# ✅ Setup Google Sheets
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
-if not GOOGLE_CREDENTIALS_FILE:
-    raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
-
-# ✅ Use file directly
-creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
-gsheet_client = gspread.authorize(creds)
-sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
-
-# Ensure sheet header
-if sheet.row_count < 2:
-    sheet.append_row(["Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing"])
-
-# ✅ Binance API
-client = Client(API_KEY, API_SECRET)
-
-# ✅ Log all requests
+# ✅ Register webhook route after loading secret
 @app.before_request
 def log_request():
     print(f"[DEBUG] {request.method} {request.path}")
 
-# ✅ Health check
 @app.route("/test", methods=["GET"])
 def test():
-    return "Webhook server is up and running."
+    return "Bot is alive."
 
-# ✅ Webhook endpoint
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook():
     data = request.json
-    print(f"[DEBUG] Received webhook data: {data}")
+    print(f"[DEBUG] Received webhook: {data}")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
@@ -63,7 +42,7 @@ def webhook():
         action = data.get("action")
         testing = data.get("testing", "no").lower() == "yes"
 
-        # Get price
+        # Get current price
         ticker = client.get_symbol_ticker(symbol=symbol)
         price = round(float(ticker["price"]), 2)
 
@@ -115,12 +94,21 @@ def webhook():
 
     return jsonify({"status": "no valid action"})
 
-# ✅ 404 fallback
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "404 Not Found", "message": str(e)}), 404
 
-# ✅ Run app
+# ✅ Google Sheets & Binance setup
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+gsheet_client = gspread.authorize(creds)
+sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
+if sheet.row_count < 2:
+    sheet.append_row(["Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing"])
+
+client = Client(API_KEY, API_SECRET)
+
+# ✅ Start the server
 if __name__ == '__main__':
-    print(f"[INFO] Flask server running at /webhook/{WEBHOOK_SECRET}")
+    print(f"[INFO] Running Flask app at /webhook/{WEBHOOK_SECRET}")
     app.run(host='0.0.0.0', port=10000)
