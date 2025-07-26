@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 
-# Load environment
+# Load environment variables
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
@@ -18,10 +18,25 @@ GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
 print(f"[DEBUG] WEBHOOK_SECRET = {WEBHOOK_SECRET}")
 print(f"[DEBUG] Using credentials from {GOOGLE_CREDENTIALS_FILE}")
 
-# Flask app
+# Setup Google Sheets & Binance client
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+gsheet_client = gspread.authorize(creds)
+sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
+
+# Ensure header
+expected_header = [
+    "Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing",
+    "Sell Time", "Sell Price", "Profit", "Closed"
+]
+header = sheet.row_values(1)
+if header != expected_header:
+    sheet.delete_rows(1)
+    sheet.insert_row(expected_header, 1)
+
+client = Client(API_KEY, API_SECRET)
 app = Flask(__name__)
 
-# Request logging
 @app.before_request
 def log_request():
     print(f"[DEBUG] {request.method} {request.path}")
@@ -30,12 +45,28 @@ def log_request():
 def test():
     return "Bot is alive."
 
-# Webhook endpoint
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook():
-    data = request.json
-    print(f"[DEBUG] Received webhook: {data}")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Debug raw request
+    print("[DEBUG] Headers:", dict(request.headers))
+    print("[DEBUG] Raw Body:", request.data)
+
+    # Log raw alerts to file
+    with open("raw_alerts.log", "a") as log_file:
+        log_file.write(f"{now} - {request.data.decode(errors='ignore')}\n")
+
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        print("[ERROR] Failed to parse JSON:", str(e))
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+    print("[DEBUG] Parsed JSON:", data)
+
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON data"}), 400
 
     try:
         raw_symbol = data.get("symbol", "BTCUSDT").upper()
@@ -43,7 +74,7 @@ def webhook():
         action = data.get("action")
         testing = data.get("testing", "no").lower() == "yes"
 
-        # Get market price
+        # Get current price
         ticker = client.get_symbol_ticker(symbol=symbol)
         price = round(float(ticker["price"]), 2)
 
@@ -63,10 +94,10 @@ def webhook():
             if qty <= 0:
                 return jsonify({"status": "no balance to sell", "symbol": symbol})
 
-            # Find matching open buy
+            # Find matching open BUY
             records = sheet.get_all_records()
             matched_row_index = None
-            for i, row in enumerate(records, start=2):  # start=2 because index 1 is the header
+            for i, row in enumerate(records, start=2):  # start=2 (header is row 1)
                 if (
                     row["Symbol"] == symbol and
                     row["Action"] == "BUY" and
@@ -82,7 +113,7 @@ def webhook():
 
             profit = round((price - buy_price) * buy_qty, 2)
 
-            # Perform sell (real or test)
+            # Execute real trade
             if not testing:
                 client.create_order(
                     symbol=symbol,
@@ -93,7 +124,7 @@ def webhook():
                     price=str(price)
                 )
 
-            # Update profit info in the same row
+            # Update matched buy row
             sheet.update(f"H{matched_row_index}", [[now]])     # Sell Time
             sheet.update(f"I{matched_row_index}", [[price]])   # Sell Price
             sheet.update(f"J{matched_row_index}", [[profit]])  # Profit
@@ -106,33 +137,16 @@ def webhook():
                 "sell_price": price
             })
 
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        return jsonify({"status": "error", "message": str(e)})
+        else:
+            return jsonify({"status": "ignored", "message": "No valid action"})
 
-    return jsonify({"status": "no valid action"})
+    except Exception as e:
+        print("[ERROR]", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "404 Not Found", "message": str(e)}), 404
-
-# Setup Google Sheets & Binance client
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
-gsheet_client = gspread.authorize(creds)
-sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
-
-# Ensure header is correct
-header = sheet.row_values(1)
-expected_header = [
-    "Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing",
-    "Sell Time", "Sell Price", "Profit", "Closed"
-]
-if header != expected_header:
-    sheet.delete_rows(1)
-    sheet.insert_row(expected_header, 1)
-
-client = Client(API_KEY, API_SECRET)
 
 if __name__ == '__main__':
     print(f"[INFO] Running Flask app at /webhook/{WEBHOOK_SECRET}")
