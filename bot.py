@@ -7,20 +7,21 @@ import os
 import json
 from dotenv import load_dotenv
 
+# Load environment variables before any use
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Binance_Logs")
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
+# Set up Google credentials
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
 if not google_creds_env:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
 
 google_creds_json = google_creds_env.encode().decode('unicode_escape')
-
 with open("google_credentials.json", "w") as f:
     f.write(google_creds_json)
 
@@ -28,12 +29,25 @@ creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.jso
 gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
 
+# Ensure sheet header row exists
 if sheet.row_count < 2:
     sheet.append_row(["Time", "Action", "Symbol", "Amount (USDT)", "Price", "Quantity", "Testing"])
 
+# Initialize Binance and Flask
 client = Client(API_KEY, API_SECRET)
 app = Flask(__name__)
 
+# Debug: log every request path
+@app.before_request
+def log_request():
+    print(f"[DEBUG] Incoming request: {request.method} {request.path}")
+
+# Test endpoint
+@app.route("/test", methods=["GET"])
+def test():
+    return "Server is running."
+
+# Main webhook route
 @app.route(f'/webhook/{WEBHOOK_SECRET}', methods=['POST'])
 def webhook():
     data = request.json
@@ -97,5 +111,12 @@ def webhook():
 
     return jsonify({"status": "no valid action"})
 
+# Handle 404 clearly
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "404 Not Found", "message": str(e)}), 404
+
+# Run the app
 if __name__ == '__main__':
+    print(f"Running Flask app with webhook route: /webhook/{WEBHOOK_SECRET}")
     app.run(host='0.0.0.0', port=10000)
