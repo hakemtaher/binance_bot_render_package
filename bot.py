@@ -24,15 +24,12 @@ print(f"[DEBUG] Registering webhook route at /webhook/{WEBHOOK_SECRET}")
 
 # ✅ Setup Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
-if not google_creds_env:
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
+if not GOOGLE_CREDENTIALS_FILE:
     raise Exception("Missing GOOGLE_CREDENTIALS environment variable")
 
-google_creds_json = google_creds_env.encode().decode('unicode_escape')
-with open("google_credentials.json", "w") as f:
-    f.write(google_creds_json)
-
-creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
+# ✅ Use file directly
+creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
 gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open(GOOGLE_SHEET_NAME).sheet1
 
