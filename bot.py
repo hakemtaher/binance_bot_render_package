@@ -1,86 +1,92 @@
 import os
 import json
-from flask import Flask, request
+import time
+from flask import Flask, request, jsonify
 from binance.client import Client
-from datetime import datetime
-import gspread
+from binance.exceptions import BinanceAPIException
 from oauth2client.service_account import ServiceAccountCredentials
+import gspread
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Load Binance API keys from env
-BINANCE_API_KEY = os.getenv("API_KEY")
-BINANCE_API_SECRET = os.getenv("API_SECRET")
-client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-
-# Load Google Sheet name and credentials
+# Load environment variables
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
-CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS")
+CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS")  # path to JSON file
 
+# Setup Binance client
+client = Client(API_KEY, API_SECRET)
+
+# Setup Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
 gc = gspread.authorize(creds)
 sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
 
+# Helper to log to sheet
+def log_trade(data):
+    sheet.append_row(data)
+
+# Store buy orders to match with sells
+open_trades = []
+
 @app.route('/webhook/<secret>', methods=['POST'])
 def webhook(secret):
-    try:
-        expected_secret = os.getenv("WEBHOOK_SECRET")
-        if secret != expected_secret:
-            return {"error": "Unauthorized"}, 401
+    if secret != WEBHOOK_SECRET:
+        return jsonify({"error": "Unauthorized"}), 403
 
-        data = request.json
-        print(f"[DEBUG] Incoming Data: {data}")
+    try:
+        data = request.get_json(force=True)
+        print(f"[DEBUG] Webhook Received: {data}")
 
         symbol = data["symbol"].strip().upper()
         action = data["action"].lower()
-        amount = float(data.get("amount", 0))
-        testing = data.get("testing", "").upper()
+        amount = float(data.get("amount", 100))
+        testing = data.get("testing", "yes").upper()
 
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         if action == "buy":
-            price = float(client.get_symbol_ticker(symbol=symbol)["price"])
             quantity = round(amount / price, 8)
-            sheet.append_row([now, "BUY", symbol, amount, price, quantity, testing, "", "", "", "NO"])
-            return {"status": "Buy logged"}, 200
+            open_trades.append({
+                "symbol": symbol,
+                "amount": amount,
+                "price": price,
+                "quantity": quantity,
+                "timestamp": timestamp,
+                "testing": testing
+            })
+            log_trade([timestamp, "BUY", symbol, amount, price, quantity, testing, "", "", "", "NO"])
 
         elif action == "sell":
-            row_idx = find_open_buy_row(symbol, testing)
-            if not row_idx:
-                return {"error": "No open BUY found"}, 404
+            for i, trade in enumerate(open_trades):
+                if trade["symbol"] == symbol and trade["testing"] == testing:
+                    buy_price = trade["price"]
+                    quantity = trade["quantity"]
+                    profit = round((price - buy_price) * quantity, 2)
+                    sell_time = timestamp
 
-            buy_row = sheet.row_values(row_idx)
-            buy_price = float(buy_row[4])
-            buy_amount = float(buy_row[3])
-            sell_price = float(client.get_symbol_ticker(symbol=symbol)["price"])
-            profit = round(((sell_price - buy_price) * (buy_amount / buy_price)), 2)
+                    log_trade([
+                        trade["timestamp"], "BUY", trade["symbol"], trade["amount"],
+                        trade["price"], trade["quantity"], trade["testing"],
+                        sell_time, price, profit, "YES"
+                    ])
 
-            sheet.update(f'H{row_idx}', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-            sheet.update(f'I{row_idx}', sell_price)
-            sheet.update(f'J{row_idx}', profit)
-            sheet.update(f'K{row_idx}', "YES")
+                    del open_trades[i]
+                    break
 
-            return {"status": "Sell logged", "profit": profit}, 200
+        return jsonify({"status": "success"}), 200
 
-        else:
-            return {"error": "Unknown action"}, 400
-
+    except BinanceAPIException as e:
+        print(f"[ERROR] Binance API Error: {e}")
+        return jsonify({"error": str(e)}), 500
     except Exception as e:
-        print("[ERROR]", e)
-        return {"error": str(e)}, 500
-
-def find_open_buy_row(symbol, testing):
-    records = sheet.get_all_records()
-    for idx, row in enumerate(records, start=2):  # data starts from row 2
-        if (
-            row.get("Symbol") == symbol and
-            row.get("Action") == "BUY" and
-            row.get("Closed") != "YES" and
-            row.get("Testing", "").upper() == testing
-        ):
-            return idx
-    return None
+        print(f"[ERROR] General Exception: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=10000)
+    app.run(host="0.0.0.0", port=10000)
