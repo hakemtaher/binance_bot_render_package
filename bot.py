@@ -49,11 +49,9 @@ def test():
 def webhook():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Debug raw request
     print("[DEBUG] Headers:", dict(request.headers))
     print("[DEBUG] Raw Body:", request.data)
 
-    # Log raw alerts to file
     with open("raw_alerts.log", "a") as log_file:
         log_file.write(f"{now} - {request.data.decode(errors='ignore')}\n")
 
@@ -70,13 +68,13 @@ def webhook():
 
     try:
         raw_symbol = data.get("symbol", "BTCUSDT").upper()
-        symbol = raw_symbol.split(":")[-1]
+        symbol = raw_symbol.split(":")[-1].strip().upper()
         action = data.get("action")
         testing = data.get("testing", "no").lower() == "yes"
 
         # Get current price
         ticker = client.get_symbol_ticker(symbol=symbol)
-        price = round(float(ticker["price"]), 2)
+        price = round(float(ticker["price"]), 6)
 
         if action == "buy":
             usdt_amount = float(data.get("amount", 20))
@@ -88,19 +86,22 @@ def webhook():
 
         elif action == "sell":
             asset = symbol.replace("USDT", "")
-            balance = float(client.get_asset_balance(asset=asset)["free"])
+            balance_info = client.get_asset_balance(asset=asset)
+            balance = float(balance_info["free"])
             qty = round(balance, 6)
 
-            if qty <= 0:
+            print(f"[DEBUG] Balance for {asset}: {qty}")
+            if qty < 1e-6:
+                print(f"[WARNING] Balance too low to sell: {qty}")
                 return jsonify({"status": "no balance to sell", "symbol": symbol})
 
             # Find matching open BUY
             records = sheet.get_all_records()
             matched_row_index = None
-            for i, row in enumerate(records, start=2):  # start=2 (header is row 1)
+            for i, row in enumerate(records, start=2):
                 if (
-                    row["Symbol"] == symbol and
-                    row["Action"] == "BUY" and
+                    row["Symbol"].strip().upper() == symbol and
+                    row["Action"].strip().upper() == "BUY" and
                     str(row.get("Closed", "")).strip().upper() != "YES"
                 ):
                     matched_row_index = i
@@ -109,9 +110,10 @@ def webhook():
                     break
 
             if matched_row_index is None:
+                print(f"[DEBUG] No open BUY match found for symbol: {symbol}")
                 return jsonify({"status": "no matching buy found", "symbol": symbol})
 
-            profit = round((price - buy_price) * buy_qty, 2)
+            profit = round((price - buy_price) * buy_qty, 6)
 
             # Execute real trade
             if not testing:
